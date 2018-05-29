@@ -1,4 +1,5 @@
-# coding: utf-8
+import sys
+
 import numpy as np
 import scipy
 import pylab as plt
@@ -6,41 +7,30 @@ import omnium as om
 import iris
 
 FILE_LOC = '/media/markmuetz/SAMSUNG/mirrors/archer/work/cylc-run/u-ax548/share/data/history/m500_large_dom_no_wind/w072.nc'
+DEFAULT_METHOD = 'loop_time'
 
-TEST = False
-SINGLE_TIME = True
-LOOP_TIME = False
-LOOP_HEIGHT = True
-LOOP_FILTER_SCALE = False
-PLOTS = [1, 2, 3, 4, 5, 6]
-# PLOTS = [2, 4, 6]
-# PLOTS = [4, 5, 6]
+FILTER = True
+PLOTS = {
+    'loop_time': ['mean_pow', 'mean_pow_spectrum'],
+    'loop_height': [],
+}
+
+ANIMS = {
+    'loop_time': ['time'],
+    'loop_height': ['height'],
+}
 
 LEVEL_HEIGHT_INDEX = 15
+TIME_INDEX = -1
 
 CUTOFF = 'sigmoid'
 FILTER_SCALE = 4
 FILTER_SHAPRNESS = 0.5
 
-
-def radial_profile_orig(data, center):
-    # Thank you: https://stackoverflow.com/a/21242776/54557
+def radial_profile(data, centre=None):
     y, x = np.indices((data.shape))
-    r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-
-    # TODO: no need for this - just use histogram in float version of r.
-    r_approx = r.astype(np.int)
-
-    tbin = np.bincount(r_approx.ravel(), data.ravel())
-    nr = np.bincount(r_approx.ravel())
-    radialprofile = tbin / nr
-
-    return radialprofile 
-
-
-def radial_profile(data, centre):
-    # BIG DIFF between this and other function.
-    y, x = np.indices((data.shape))
+    if not centre:
+        centre = (data.shape[0] // 2, data.shape[1] // 2)
     r = np.sqrt((x - centre[0])**2 + (y - centre[1])**2)
 
     radialprofile, bins, binindex = scipy.stats.binned_statistic(r.flatten(), 
@@ -52,46 +42,108 @@ def radial_profile(data, centre):
     return midpoints, radialprofile 
 
 
-def calc_w_fft(w_data, cutoff=CUTOFF, scale=FILTER_SCALE, sharpness=FILTER_SHAPRNESS, pause=3, 
-               wait=False):
-    ft_w = np.fft.fft2(w_data)
-    ft_w_shifted = np.fft.fftshift(ft_w)
+class FftProc:
+    def __init__(self, cube):
+        self.cube = cube
 
-    pow_w2 = np.abs(ft_w_shifted)**2
-    y, x = np.indices((w_data.shape))
-    r = np.sqrt((x - 256)**2 + (y - 256)**2)
+    def run(self, method, **args):
+        """Dispatch on method"""
+        print('Running {}'.format(method))
+        return getattr(self, method)(**args)
+    
+    def _calc_filtered(self,
+                       cutoff=CUTOFF,
+                       scale=FILTER_SCALE,
+                       sharpness=FILTER_SHAPRNESS):
+        y, x = np.indices((self.cube[0, 0].shape))
+        r = np.sqrt((x - 256)**2 + (y - 256)**2)
 
-    ft_w_hi_pass = ft_w_shifted.copy()
-    ft_w_lo_pass = ft_w_shifted.copy()
+        ft_hi_pass = np.fft.fftshift(self.fts.copy(), axes=(1, 2))
+        ft_lo_pass = np.fft.fftshift(self.fts.copy(), axes=(1, 2))
+        self.cutoff = cutoff
+        self.scale = scale
+        self.sharpness =sharpness
 
-    if cutoff == 'sharp':
-        ft_w_hi_pass[r <= scale] = 0
-        ft_w_lo_pass[r > scale] = 0
-    if cutoff == 'sigmoid':
-        sigmoid = 1 / (1 + np.exp((r - scale) * sharpness))
-        ft_w_hi_pass *= (1 - sigmoid)
-        ft_w_lo_pass *= sigmoid
+        if cutoff == 'sharp':
+            ft_hi_pass[:, r <= scale] = 0
+            ft_lo_pass[:, r > scale] = 0
+        if cutoff == 'sigmoid':
+            sigmoid = 1 / (1 + np.exp((r - scale) * sharpness))
+            ft_hi_pass *= (1 - sigmoid)
+            ft_lo_pass *= sigmoid
 
-    w_hi_pass = np.fft.ifft2(np.fft.fftshift(ft_w_hi_pass))
-    w_lo_pass = np.fft.ifft2(np.fft.fftshift(ft_w_lo_pass))
+        self.hi_pass = np.fft.ifft2(np.fft.ifftshift(ft_hi_pass, axes=(1, 2)))
+        self.lo_pass = np.fft.ifft2(np.fft.ifftshift(ft_lo_pass, axes=(1, 2)))
+    
+    def single_time(self, time_index=TIME_INDEX, level_height_index=LEVEL_HEIGHT_INDEX):
+        self.ft = np.fft.fft2(self.cube[time_index, level_height_index].data)
+        self.mean_pow = np.abs(self.ft)**2
 
-    if 1 in PLOTS:
-        plt.figure(1)
+    def loop_time(self, level_height_index=LEVEL_HEIGHT_INDEX):
+        self.height = self.cube[0, level_height_index].coord('level_height').points[0]
+        print('Height: {}'.format(self.height))
+
+        self.fts = np.fft.fft2(self.cube[:, level_height_index].data)
+        self.pows = np.abs(self.fts)**2
+
+        self.mean_ft = self.fts.mean(axis=0)
+        self.mean_pow = self.pows.mean(axis=0)
+
+        if FILTER:
+            self._calc_filtered()
+
+    def loop_height(self, time_index=TIME_INDEX):
+        self.time = self.cube[time_index].coord('time').points[0]
+        print('Time: {}'.format(self.time))
+
+        self.fts = np.fft.fft2(self.cube[time_index, :].data)
+        self.pows = np.abs(self.fts)**2
+
+    def loop_time_height(self):
+        raise Exception('Too memory hungry!')
+        shape = self.cube.shape
+        self.fts = np.zeros(shape, dtype=np.complex)
+        self.pows = np.zeros(shape)
+
+        self.fts = np.fft.fft2(self.cube.data)
+        self.pows = np.abs(ft)**2
+
+        self.mean_ft = self.fts.mean(axis=0)
+        self.mean_pow = self.pows.mean(axis=0)
+
+
+class Plotter:
+    def __init__(self, fft_proc):
+        self.fft_proc = fft_proc
+
+    def run(self, plots, anims):
+        for i in plots:
+            method = 'plot_{}'.format(i)
+            print('Running {}'.format(method))
+            getattr(self, method)()
+        for i in anims:
+            method = 'anim_{}'.format(i)
+            print('Running {}'.format(method))
+            getattr(self, method)()
+
+    def plot_mean_pow(self):
+        plt.figure('mean_pow')
         plt.clf()
-        plt.imshow(np.log10(pow_w2))
+        plt.imshow(np.log10(np.fft.fftshift(self.fft_proc.mean_pow)))
         # plt.imshow(pow_w2)
         plt.pause(0.001)
 
-    if 2 in PLOTS:
-        plt.figure(2)
-        plt.clf()
-        r, r_pow_w2 = radial_profile(pow_w2, (256, 256))
+    def _plot_pow_spectrum(self, power, height):
+        plt.title('Height: {} m'.format(height))
+
+        power = np.fft.fftshift(power)
+        r, r_pow_w2 = radial_profile(power, (256, 256))
 
         # N.B. don't plot (256, 256) which is zero freq term.
         # Single row along x
-        plt.loglog(pow_w2[256, 257:], 'b-', label='x-dir')
+        plt.loglog(power[256, 257:], 'b-', label='x-dir')
         # Single col along y
-        plt.loglog(pow_w2[256:, 257], 'r-', label='y-dir')
+        plt.loglog(power[256:, 257], 'r-', label='y-dir')
         # Radial sum.
         plt.loglog(r[1:257], r_pow_w2[1:257], 'g-', label='radial')
 
@@ -101,123 +153,62 @@ def calc_w_fft(w_data, cutoff=CUTOFF, scale=FILTER_SCALE, sharpness=FILTER_SHAPR
         plt.legend()
         plt.xlabel('scale')
         plt.ylabel('power (m$^2$ s$^{-2}$)')
+
+    def plot_mean_pow_spectrum(self):
+        plt.figure('mean_pow_spectrum')
+        plt.clf()
+        self._plot_pow_spectrum(self.fft_proc.mean_pow, self.fft_proc.height)
         plt.pause(0.001)
     
-    if 4 in PLOTS:
-        plt.figure(4)
-        plt.clf()
-        plt.imshow(w_data)
-        plt.pause(.001)
+    def anim_time(self):
+        assert self.fft_proc.lo_pass.imag.max() < 1e-12
 
-    #import ipdb; ipdb.set_trace()
-
-    if 5 in PLOTS:
-        assert w_hi_pass.imag.max() < 1e12
-        assert w_lo_pass.imag.max() < 1e12
-
-        plt.figure(5)
-        plt.clf()
-        plt.title('High pass (cutoff={}, scale={}, sharpness={})'
-                  .format(cutoff, scale, sharpness))
-        plt.imshow(np.real(w_hi_pass))
-        plt.pause(.001)
-
-    if 6 in PLOTS:
-        plt.figure(6)
-        plt.clf()
-        plt.title('Low pass (cutoff={}, scale={}, sharpness={})'
-                  .format(cutoff, scale, sharpness))
-        plt.imshow(np.real(w_lo_pass))
-        plt.pause(.001)
-
-    if wait:
-        r = input('Enter to continue, q to quit: ')
-        if r == 'q':
-            return
-    else:
-        plt.pause(pause)
-
-
-def tests(w):
-    print('All 1')
-    w_test = np.zeros_like(w[0, LEVEL_HEIGHT_INDEX].data)
-    w_test[:, :] = 1
-    import ipdb; ipdb.set_trace()
-    calc_w_fft(w_test)
-    input('Enter to continue')
-
-    print('Centre points')
-    w_test = np.zeros_like(w[0, LEVEL_HEIGHT_INDEX].data)
-    w_test[255:257, 255:257] = 1
-    calc_w_fft(w_test)
-    input('Enter to continue')
-
-    print('Band in x-dir')
-    w_test = np.zeros_like(w[0, LEVEL_HEIGHT_INDEX].data)
-    w_test[250:260, :] = 1
-    calc_w_fft(w_test)
-    input('Enter to continue')
-
-    print('Centre circle r=10')
-    w_test = np.zeros_like(w[0, LEVEL_HEIGHT_INDEX].data)
-    y, x = np.indices((w_test.shape))
-    # import ipdb; ipdb.set_trace()
-    w_test[(x - 256)**2 + (y - 256)**2 < 100] = 1
-    calc_w_fft(w_test)
-    input('Enter to continue')
-
-    print('Some sines/cosines in x/y.')
-    w_test = np.zeros_like(w[0, LEVEL_HEIGHT_INDEX].data)
-    y, x = np.indices((w_test.shape))
-    sin_x_modes = [3, 7, 11, 17]
-    cos_y_modes = [4, 6, 11, 22]
-    for sin_x_mode in sin_x_modes:
-        w_test += np.sin(sin_x_mode * 2 * np.pi * x / 512)
-    for cos_y_mode in cos_y_modes:
-        w_test += np.cos(cos_y_mode * 2 * np.pi * y / 512)
-    calc_w_fft(w_test)
-    input('Enter to continue')
-
-    print('sinc')
-    w_test = np.zeros_like(w[0, LEVEL_HEIGHT_INDEX].data)
-    y, x = np.indices((w_test.shape))
-    # 0.0001 stops div by zero errors.
-    r = np.sqrt((x - 256.0001)**2 + (y - 256.0001)**2)
-    w_test = np.sin(r) / r
-    calc_w_fft(w_test)
-    input('Enter to continue')
-
-
-def main():
-    w = iris.load(FILE_LOC)[0]
-    plt.ion()
-
-    if TEST:
-        tests(w)
-
-    if SINGLE_TIME:
-        print('Height: {}'.format(w[0, LEVEL_HEIGHT_INDEX].coord('level_height').points[0]))
-        calc_w_fft(w[-1, LEVEL_HEIGHT_INDEX].data)
-    elif LOOP_TIME:
-        print('Height: {}'.format(w[0, LEVEL_HEIGHT_INDEX].coord('level_height').points[0]))
-        print('loop_time')
-        for i in range(w.shape[0]):
+        for i in range(self.fft_proc.cube.shape[0]):
             print(i)
-            calc_w_fft(w[i, LEVEL_HEIGHT_INDEX].data, pause=0.01)
-    elif LOOP_HEIGHT:
-        print('loop_height')
-        for i in range(w.shape[1]):
-            print('Height: {}'.format(w[0, i].coord('level_height').points[0]))
-            calc_w_fft(w[-1, i].data)
-    elif LOOP_FILTER_SCALE:
-        print('loop_filter_scale')
-        print('Height: {}'.format(w[0, LEVEL_HEIGHT_INDEX].coord('level_height').points[0]))
-        for i in range(100):
-            calc_w_fft(w[-1, LEVEL_HEIGHT_INDEX].data, scale=i, pause=0.01)
+            plt.figure('anim_time')
+            plt.clf()
+            self._plot_pow_spectrum(self.fft_proc.pows[i], self.fft_proc.height)
+            plt.pause(0.001)
 
-    return w
+            lo_pass = self.fft_proc.lo_pass[i].real
+            plt.figure('low_pass')
+            plt.clf()
+            plt.title('Low pass (cutoff={}, scale={}, sharpness={})'
+                      .format(self.fft_proc.cutoff, self.fft_proc.scale, self.fft_proc.sharpness))
+            plt.imshow(lo_pass)
+            plt.pause(.001)
+
+    def anim_height(self):
+        for i in range(self.fft_proc.cube.shape[1]):
+            print('Height: {}'.format(self.fft_proc.cube[0, i].coord('level_height').points[0]))
+            plt.clf()
+            plt.title('Height: {}'.format(self.fft_proc.cube[0, i].coord('level_height').points[0]))
+            plt.figure('anim_height')
+            self._plot_pow_spectrum(self.fft_proc.pows[i])
+            plt.pause(1)
+
+
+def main(method, kwargs):
+    w = iris.load(FILE_LOC)[0]
+
+    # Do processing.
+    proc = FftProc(w)
+    # proc.run('single_time')
+    proc.run(method, **kwargs)
+
+    plotter = Plotter(proc)
+    plotter.run(PLOTS[method], ANIMS[method])
+    return plotter
 
 
 if __name__ == '__main__':
-    w = main()
+    if len(sys.argv) > 1:
+        method = sys.argv[1]
+        kwargs = {}
+        for arg in sys.argv[2:]:
+            param, val = arg.split(':')
+            kwargs[param] = int(val)
+    else:
+        method = DEFAULT_METHOD
 
+    plotter = main(method, kwargs)
