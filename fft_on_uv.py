@@ -3,21 +3,21 @@ import sys
 import numpy as np
 import scipy
 import pylab as plt
-import omnium as om
 import iris
 
-FILE_LOC = '/home/markmuetz/mirrors/archer/work/cylc-run/u-ax548/share/data/history/m500_large_dom_no_wind/w072.nc'
+from omnium.utils import get_cube
+
+FILE_LOC = '/home/markmuetz/mirrors/archer/work/cylc-run/u-ax548/share/data/history/km1_large_dom_no_wind_dso_damping/uv072.nc'
 DEFAULT_METHOD = 'loop_time'
 
 FILTER = True
 PLOTS = {
-    'single_time': ['mean_pow', 'mean_pow_spectrum'],
     'loop_time': ['mean_pow', 'mean_pow_spectrum'],
     'loop_height': [],
 }
 
 ANIMS = {
-    'loop_time': ['time'],
+    'loop_time': [],
     'loop_height': ['height'],
 }
 
@@ -43,9 +43,12 @@ def radial_profile(data, centre=None):
     return midpoints, radialprofile 
 
 
-class FftProc:
-    def __init__(self, cube):
-        self.cube = cube
+class FftProcUV:
+    def __init__(self, cubes):
+        self.cubes = cubes
+        self.u = get_cube(self.cubes, 0, 2)
+        self.v = get_cube(self.cubes, 0, 3)
+
 
     def run(self, method, **args):
         """Dispatch on method"""
@@ -56,8 +59,8 @@ class FftProc:
                        cutoff=CUTOFF,
                        scale=FILTER_SCALE,
                        sharpness=FILTER_SHAPRNESS):
-        y, x = np.indices((self.cube[0, 0].shape))
-        r = np.sqrt((x - 256)**2 + (y - 256)**2)
+        y, x = np.indices((self.u[0, 0].shape))
+        r = np.sqrt((x - 128)**2 + (y - 128)**2)
 
         ft_hi_pass = np.fft.fftshift(self.fts.copy(), axes=(1, 2))
         ft_lo_pass = np.fft.fftshift(self.fts.copy(), axes=(1, 2))
@@ -77,14 +80,22 @@ class FftProc:
         self.lo_pass = np.fft.ifft2(np.fft.ifftshift(ft_lo_pass, axes=(1, 2)))
     
     def single_time(self, time_index=TIME_INDEX, level_height_index=LEVEL_HEIGHT_INDEX):
-        self.ft = np.fft.fft2(self.cube[time_index, level_height_index].data)
+        u_data = self.u[time_index, level_height_index].data
+        v_data = self.v[time_index, level_height_index].data
+        speed_data = np.sqrt(u_data**2 + v_data**2)
+
+        self.ft = np.fft.fft2(speed_data)
         self.mean_pow = np.abs(self.ft)**2
 
     def loop_time(self, level_height_index=LEVEL_HEIGHT_INDEX):
-        self.height = self.cube[0, level_height_index].coord('level_height').points[0]
+        self.height = self.u[0, level_height_index].coord('level_height').points[0]
         print('Height: {}'.format(self.height))
 
-        self.fts = np.fft.fft2(self.cube[:, level_height_index].data)
+        u_data = self.u[:, level_height_index].data
+        v_data = self.v[:, level_height_index].data
+        speed_data = np.sqrt(u_data**2 + v_data**2)
+
+        self.fts = np.fft.fft2(speed_data)
         self.pows = np.abs(self.fts)**2
 
         self.mean_ft = self.fts.mean(axis=0)
@@ -97,7 +108,11 @@ class FftProc:
         self.time = self.cube[time_index].coord('time').points[0]
         print('Time: {}'.format(self.time))
 
-        self.fts = np.fft.fft2(self.cube[time_index, :].data)
+        u_data = self.u[time_index, :].data
+        v_data = self.v[time_index, :].data
+        speed_data = np.sqrt(u_data**2 + v_data**2)
+
+        self.fts = np.fft.fft2(speed_data)
         self.pows = np.abs(self.fts)**2
 
     def loop_time_height(self):
@@ -138,17 +153,17 @@ class Plotter:
         plt.title('Height: {} m'.format(height))
 
         power = np.fft.fftshift(power)
-        r, r_pow_w2 = radial_profile(power, (256, 256))
+        r, r_pow_w2 = radial_profile(power, (128, 128))
 
-        # N.B. don't plot (256, 256) which is zero freq term.
+        # N.B. don't plot (128, 128) which is zero freq term.
         # Single row along x
-        plt.loglog(power[256, 257:], 'b-', label='x-dir')
+        plt.loglog(power[128, 129:], 'b-', label='x-dir')
         # Single col along y
-        plt.loglog(power[256:, 257], 'r-', label='y-dir')
+        plt.loglog(power[128:, 129], 'r-', label='y-dir')
         # Radial sum.
-        plt.loglog(r[1:257], r_pow_w2[1:257], 'g-', label='radial')
+        plt.loglog(r[1:129], r_pow_w2[1:129], 'g-', label='radial')
 
-        x = np.linspace(4, 256, 2)
+        x = np.linspace(4, 128, 2)
         y = 215443469 * x ** (-5 / 3)
         plt.loglog(x, y, 'k--', label='-5/3')
         plt.legend()
@@ -190,10 +205,10 @@ class Plotter:
 
 
 def main(method, kwargs):
-    w = iris.load(FILE_LOC)[0]
+    uv = iris.load(FILE_LOC)
 
     # Do processing.
-    proc = FftProc(w)
+    proc = FftProcUV(uv)
     # proc.run('single_time')
     proc.run(method, **kwargs)
 
