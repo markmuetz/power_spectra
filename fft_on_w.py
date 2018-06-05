@@ -5,7 +5,7 @@ import pylab as plt
 import omnium as om
 import iris
 
-FILE_LOC = '/media/markmuetz/SAMSUNG/mirrors/archer/work/cylc-run/u-ax548/share/data/history/m500_large_dom_no_wind/w072.nc'
+FILE_LOC = '/home/markmuetz/mirrors/archer/work/cylc-run/u-ax548/share/data/history/m500_large_dom_no_wind/w072.nc'
 
 TEST = False
 SINGLE_TIME = True
