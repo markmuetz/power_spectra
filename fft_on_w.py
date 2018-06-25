@@ -135,7 +135,7 @@ class Plotter:
         plt.pause(0.001)
 
     def _plot_pow_spectrum(self, power, height):
-        plt.title('Height: {} m'.format(height))
+        plt.title('Height: {:.2f} m'.format(height))
 
         power = np.fft.fftshift(power)
         r, r_pow_w2 = radial_profile(power, (256, 256))
@@ -183,7 +183,7 @@ class Plotter:
         for i in range(self.fft_proc.cube.shape[1]):
             print('Height: {}'.format(self.fft_proc.cube[0, i].coord('level_height').points[0]))
             plt.clf()
-            plt.title('Height: {}'.format(self.fft_proc.cube[0, i].coord('level_height').points[0]))
+            plt.title('Height: {:.2f}'.format(self.fft_proc.cube[0, i].coord('level_height').points[0]))
             plt.figure('anim_height')
             self._plot_pow_spectrum(self.fft_proc.pows[i])
             plt.pause(1)
