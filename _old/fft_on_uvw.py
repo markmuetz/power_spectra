@@ -1,4 +1,8 @@
+import os
 import sys
+
+import matplotlib
+matplotlib.use('agg')
 
 import numpy as np
 import scipy
@@ -7,12 +11,16 @@ import iris
 
 from omnium.utils import get_cube
 
-FILE_LOC = '/home/markmuetz/mirrors/archer/work/cylc-run/u-ax548/share/data/history/km1_large_dom_no_wind_dso_damping/uv072.nc'
+EXPTS = ['km1_large_dom_no_wind', 'm500_large_dom_no_wind']
+MODES = ['uv', 'w']
+
+FILE_LOC_FMT = '/home/n02/n02/mmuetz/work/cylc-run/u-ax548/share/data/history/{}/atmosa_pc072.nc'
 DEFAULT_METHOD = 'loop_time'
 
-FILTER = True
+# Contains experimental filtering code.
+FILTER = False
 PLOTS = {
-    'loop_time': ['mean_pow', 'mean_pow_spectrum'],
+    'loop_time': ['mean_pow_spectrum'],
     'loop_height': [],
 }
 
@@ -43,12 +51,27 @@ def radial_profile(data, centre=None):
     return midpoints, radialprofile 
 
 
-class FftProcUV:
-    def __init__(self, cubes):
+class FftProcUVW:
+    def __init__(self, mode, cubes):
+        self.mode = mode
         self.cubes = cubes
         self.u = get_cube(self.cubes, 0, 2)
+        coords = self.u.coords()
+        # N.B. dims are time, height, lat, lon
+        assert coords[2].name() == 'grid_latitude'
+        assert coords[3].name() == 'grid_longitude'
         self.v = get_cube(self.cubes, 0, 3)
+        self.w = get_cube(self.cubes, 0, 150)
 
+        self.nx = self.u.shape[3]
+        self.ny = self.u.shape[2]
+        assert self.nx == self.ny
+        self.half_nx = self.nx // 2
+
+        if mode == 'uv':
+            self.cube = self.u
+        elif mode == 'w':
+            self.cube = self.w
 
     def run(self, method, **args):
         """Dispatch on method"""
@@ -59,8 +82,8 @@ class FftProcUV:
                        cutoff=CUTOFF,
                        scale=FILTER_SCALE,
                        sharpness=FILTER_SHAPRNESS):
-        y, x = np.indices((self.u[0, 0].shape))
-        r = np.sqrt((x - 128)**2 + (y - 128)**2)
+        y, x = np.indices((self.cube[0, 0].shape))
+        r = np.sqrt((x - self.half_nx)**2 + (y - self.half_nx)**2)
 
         ft_hi_pass = np.fft.fftshift(self.fts.copy(), axes=(1, 2))
         ft_lo_pass = np.fft.fftshift(self.fts.copy(), axes=(1, 2))
@@ -80,22 +103,30 @@ class FftProcUV:
         self.lo_pass = np.fft.ifft2(np.fft.ifftshift(ft_lo_pass, axes=(1, 2)))
     
     def single_time(self, time_index=TIME_INDEX, level_height_index=LEVEL_HEIGHT_INDEX):
-        u_data = self.u[time_index, level_height_index].data
-        v_data = self.v[time_index, level_height_index].data
-        speed_data = np.sqrt(u_data**2 + v_data**2)
+        if self.mode == 'uv':
+            u_data = self.u[time_index, level_height_index].data
+            v_data = self.v[time_index, level_height_index].data
+            data = np.sqrt(u_data**2 + v_data**2)
+        else:
+            data = self.w[time_index, level_height_index].data
 
-        self.ft = np.fft.fft2(speed_data)
+        self.ft = np.fft.fft2(data)
         self.mean_pow = np.abs(self.ft)**2
 
     def loop_time(self, level_height_index=LEVEL_HEIGHT_INDEX):
-        self.height = self.u[0, level_height_index].coord('level_height').points[0]
-        print('Height: {}'.format(self.height))
+        self.height = self.cube[0, level_height_index].coord('level_height').points[0]
+        print('Height: {:.2f}'.format(self.height))
 
-        u_data = self.u[:, level_height_index].data
-        v_data = self.v[:, level_height_index].data
-        speed_data = np.sqrt(u_data**2 + v_data**2)
+        if self.mode == 'uv':
+            u_data = self.u[:, level_height_index].data
+            v_data = self.v[:, level_height_index].data
+            data = np.sqrt(u_data**2 + v_data**2)
+        else:
+            data = self.w[:, level_height_index].data
 
-        self.fts = np.fft.fft2(speed_data)
+        # N.B. data.shape[0] is latitude, i.e. y-dir
+        # data.shape[1] is longitude, i.e. x-dir
+        self.fts = np.fft.fft2(data)
         self.pows = np.abs(self.fts)**2
 
         self.mean_ft = self.fts.mean(axis=0)
@@ -108,11 +139,14 @@ class FftProcUV:
         self.time = self.cube[time_index].coord('time').points[0]
         print('Time: {}'.format(self.time))
 
-        u_data = self.u[time_index, :].data
-        v_data = self.v[time_index, :].data
-        speed_data = np.sqrt(u_data**2 + v_data**2)
+        if self.mode == 'uv':
+            u_data = self.u[time_index, :].data
+            v_data = self.v[time_index, :].data
+            data = np.sqrt(u_data**2 + v_data**2)
+        else:
+            data = self.w[time_index, :].data
 
-        self.fts = np.fft.fft2(speed_data)
+        self.fts = np.fft.fft2(data)
         self.pows = np.abs(self.fts)**2
 
     def loop_time_height(self):
@@ -129,8 +163,11 @@ class FftProcUV:
 
 
 class Plotter:
-    def __init__(self, fft_proc):
+    def __init__(self, expt, mode, fft_proc):
+        self.expt = expt
+        self.mode = mode
         self.fft_proc = fft_proc
+        self.half_nx = self.fft_proc.half_nx
 
     def run(self, plots, anims):
         for i in plots:
@@ -150,20 +187,23 @@ class Plotter:
         plt.pause(0.001)
 
     def _plot_pow_spectrum(self, power, height):
-        plt.title('Height: {:0.2f} m'.format(height))
+        plt.title('{}, {}, Height: {:0.2f} m'.format(self.expt, self.mode, height))
 
         power = np.fft.fftshift(power)
-        r, r_pow_w2 = radial_profile(power, (128, 128))
+        r, r_pow_w2 = radial_profile(power, (self.half_nx, self.half_nx))
 
-        # N.B. don't plot (128, 128) which is zero freq term.
-        # Single row along x
-        plt.loglog(power[128, 129:], 'b-', label='x-dir')
+        # N.B. don't plot (self.half_nx, self.half_nx) which is zero freq term.
+        # Rem. e.g. power.shape[0] is y.
         # Single col along y
-        plt.loglog(power[128:, 129], 'r-', label='y-dir')
+        power_x_slice = power[self.half_nx + 1:, self.half_nx]
+        # Single row along x
+        power_y_slice = power[self.half_nx, self.half_nx + 1:]
+        plt.loglog(range(1, self.half_nx), power_x_slice, 'b-', label='x-dir')
+        plt.loglog(range(1, self.half_nx), power_y_slice, 'r-', label='y-dir')
         # Radial sum.
-        plt.loglog(r[1:129], r_pow_w2[1:129], 'g-', label='radial')
+        plt.loglog(r[1:self.half_nx + 1], r_pow_w2[1:self.half_nx + 1], 'g-', label='radial')
 
-        x = np.linspace(4, 128, 2)
+        x = np.linspace(4, self.half_nx, 2)
         y = 215443469 * x ** (-5 / 3)
         plt.loglog(x, y, 'k--', label='-5/3')
         plt.legend()
@@ -174,6 +214,11 @@ class Plotter:
         plt.figure('mean_pow_spectrum')
         plt.clf()
         self._plot_pow_spectrum(self.fft_proc.mean_pow, self.fft_proc.height)
+
+        fig_dir = os.path.join(os.path.dirname(FILE_LOC_FMT.format(self.expt)), 'figs')
+        if not os.path.exists(fig_dir):
+            os.makedirs(fig_dir)
+        plt.savefig(os.path.join(fig_dir, self.expt + '_' + self.mode + '_pow_spec.png'))
         plt.pause(0.001)
     
     def anim_time(self):
@@ -204,27 +249,33 @@ class Plotter:
             plt.pause(1)
 
 
-def main(method, kwargs):
-    uv = iris.load(FILE_LOC)
+def main(expt, mode, method, kwargs):
+    cubes = iris.load(FILE_LOC_FMT.format(expt))
 
     # Do processing.
-    proc = FftProcUV(uv)
+    proc = FftProcUVW(mode, cubes)
     # proc.run('single_time')
     proc.run(method, **kwargs)
 
-    plotter = Plotter(proc)
+    plotter = Plotter(expt, mode, proc)
     plotter.run(PLOTS[method], ANIMS[method])
-    return plotter
+    return cubes, plotter
 
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
-        method = sys.argv[1]
+        expt = sys.argv[1]
+        mode = sys.argv[2]
+        method = sys.argv[3]
         kwargs = {}
-        for arg in sys.argv[2:]:
+        for arg in sys.argv[4:]:
             param, val = arg.split(':')
             kwargs[param] = int(val)
+        cubes, plotter = main(expt, mode, method, kwargs)
     else:
+        kwargs = {}
         method = DEFAULT_METHOD
-
-    plotter = main(method, kwargs)
+        for expt in EXPTS:
+            for mode in MODES:
+                print('{}, {}'.format(expt, mode))
+                cubes, plotter = main(expt, mode, method, kwargs)
